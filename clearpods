@@ -1,0 +1,94 @@
+#!/bin/bash
+
+# Read Parameters
+while getopts f:4:e: flag
+do
+    case "${flag}" in
+        f) force=${OPTARG};;
+        4) include4=${OPTARG};;
+        e) env=${OPTARG};;
+    esac
+done
+echo "Force: $force";
+echo "Include 4: $include4";
+echo "Environment: $env";
+
+# tsh status to determine if sec or IPN
+read s < <(tsh status | grep "> Profile URL")
+case $s in
+  *"telp-w2"*)
+    if [ $env ]; then
+      declare -a clusters=($env)
+    elif [[ "$include4" == 'true' ]]
+    then
+      declare -a clusters=("uat-w2-sec1" "uat2-w2-sec2" "uat2-w2-sec3" "uat-secure4" "uat-secure4-job" "uat-secure6" "uat-secure7")
+    else
+      declare -a clusters=("uat-w2-sec1" "uat2-w2-sec2" "uat2-w2-sec3" "uat-secure6" "uat-secure7")
+    fi
+    ;;
+
+  *"telp-ipn"*)
+    if [ $env ]; then
+      declare -a clusters=($env)
+    elif [[ "$include4" == 'true' ]]
+    then
+      declare -a clusters=("ipn1-ipn1" "ipn2-ipn2" "ipn2-ipn3" "prod-ipn4" "prod-ipn4-job" "ipn6-ipn6" "ipn7-ipn7")
+    else
+      declare -a clusters=("ipn1-ipn1" "ipn2-ipn2" "ipn2-ipn3" "ipn6-ipn6" "ipn7-ipn7")
+    fi
+    ;;
+
+  *)
+    echo "Not connected"
+    exit 127
+esac
+
+echo -en ' \n \n' > /tmp/clearpods.log
+
+# Loop thru clusters
+declare -a errors
+for c in "${clusters[@]}"
+do
+  # connect to each environment
+  tsh login $c > /tmp/ignore #> /dev/null 2&1
+  tsh kube login $c
+
+  # log environment
+  echo $c
+  echo $c >> /tmp/clearpods.log
+
+  # Get list of issues
+  e="$(kubectl get pods --all-namespaces | grep -v -e Completed -e Running -e NAMESPACE)"; readarray -t e <<<"$e"
+  # Getting the errors this way shows 1 when there are zero errors
+  if [ -z "$e" ];then
+    echo "Error Count: 0"
+    continue
+  fi
+  echo "Error Count: ${#e[@]}"
+
+  # Loop thru errors
+  for err in "${e[@]}"
+  do
+
+    # Get controlling job
+    arrCtl=$(kubectl describe pod $(echo $err | awk '{print $2}') -n $(echo $err | awk '{print $1}') | grep -i controlled) 
+    s=$(echo $arrCtl | awk 'BEGIN {FS="/"} {print $1}' | awk '{print $3}')
+
+    # w/Force delete Errored jobs, else just log
+    if [[ $force == true ]]; then
+      if [[ $s == "Job" ]] && [[ $(echo $err | awk '{print $4}') == "Error" ]]; then
+        kubectl delete jobs $(echo $arrCtl | awk -F'/' '{print $2}') -n $(echo $err | awk '{print $1}')
+      else
+        echo  $(echo $arrCtl | awk -F'/' '{print $2}') $(echo $err | awk '{print $1}') $(echo $err | awk '{print $4}') $(echo $s | awk '{print $3}') >> /tmp/clearpods.log
+      fi
+    else
+      echo  $(echo $arrCtl | awk -F'/' '{print $2}') $(echo $err | awk '{print $1,$4}') $(echo $s | awk '{print $3}') >> /tmp/clearpods.log
+    fi 
+    # w/o Force message how-to delete
+    if [[ $force != true ]] && [[ $s == "Job" ]]  && [ $(echo $err | awk '{print $4}') == Error ]; then
+      echo "Run 'kubectl delete jobs $(echo $arrCtl | awk -F'/' '{print $2}') -n $(echo $err | awk '{print $1}')' to remove job"
+    fi
+  done
+done
+
+cat /tmp/clearpods.log
